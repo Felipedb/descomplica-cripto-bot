@@ -2,7 +2,7 @@ name: Status Cripto Diario
 
 on:
   schedule:
-    - cron: "0 15 * * *"
+    - cron: "0 21 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -27,4 +27,3 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           COINGECKO_DEMO_KEY: ${{ secrets.COINGECKO_DEMO_KEY }}
         run: python crypto_bot.py
-
