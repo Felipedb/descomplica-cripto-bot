@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="UTF-8">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#efe9dc;--ink:#1b1813;--cobalt:#2336e8;--green:#1a7a44;--red:#c43d2e;--muted:#7a7264;--line:#1b1813;--btc:#f7931a;--eth:#627eea;--alt:#8a8275}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1080px;height:1500px;overflow:hidden}
+body{background:var(--paper);color:var(--ink);font-family:'Space Mono',monospace;padding:46px 50px;position:relative}
+.paper-tex{position:absolute;inset:0;background-image:radial-gradient(circle at 20% 30%,rgba(0,0,0,.018) 0,transparent 40%),radial-gradient(circle at 80% 70%,rgba(0,0,0,.02) 0,transparent 40%);pointer-events:none}
+.corner{position:absolute;top:0;right:0;width:0;height:0;border-top:70px solid var(--cobalt);border-left:70px solid transparent}
+.serif{font-family:'Bricolage Grotesque',sans-serif}
+.k{font-size:13px;letter-spacing:3px;text-transform:uppercase;color:var(--muted);font-weight:700}
+.up{color:var(--green)}.dn{color:var(--red)}
+.rule{height:2px;background:var(--ink);margin:14px 0}
+.thin{height:1px;background:rgba(27,24,19,.28);margin:14px 0}
+/* masthead */
+.mh-top{display:flex;justify-content:space-between;align-items:baseline}
+.title{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:74px;line-height:.95;letter-spacing:-1px;margin-top:4px}
+.mh-r{text-align:right}.mh-r .ed{font-size:14px;font-weight:700;letter-spacing:1px}
+.mh-r .dt{font-size:26px;font-weight:700;margin-top:6px}.mh-r .hr{font-size:13px;color:var(--muted);letter-spacing:1px}
+/* ticker */
+.ticker{display:flex;gap:0;font-size:16px;font-weight:700;flex-wrap:nowrap;align-items:center;justify-content:space-between}
+.ticker .tk{white-space:nowrap}.ticker .sep{color:var(--muted);padding:0 4px}
+.ticker .lbl{color:var(--muted)}
+/* section kicker */
+.kick{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.kick .n{font-family:'Bricolage Grotesque';font-size:15px;font-weight:800;color:var(--cobalt)}
+.kick .t{font-size:15px;letter-spacing:3px;font-weight:700;text-transform:uppercase}
+/* sentiment */
+.sent{display:flex;gap:46px}
+.sent .col{flex:1}
+.sent .lab{font-size:14px;letter-spacing:2px;color:var(--muted);font-weight:700;text-transform:uppercase}
+.sent .row{display:flex;justify-content:space-between;align-items:flex-end;margin-top:6px}
+.sent .big{font-family:'Bricolage Grotesque';font-size:72px;font-weight:800;line-height:.85}
+.sent .cls{font-size:18px;font-weight:700;text-align:right;max-width:200px}
+.bar{position:relative;height:10px;border-radius:6px;margin-top:18px}
+.bar.fg{background:linear-gradient(90deg,#c43d2e,#e0922a,#d9c534,#3da35a,#1a7a44)}
+.bar.as{background:linear-gradient(90deg,#e0922a,#d9c534,#6f8be0,#2336e8)}
+.bar .mk{position:absolute;top:50%;width:18px;height:18px;border-radius:50%;background:var(--paper);border:3px solid var(--ink);transform:translate(-50%,-50%)}
+.bend{display:flex;justify-content:space-between;margin-top:9px;font-size:12px;color:var(--muted);font-weight:700;letter-spacing:1px}
+/* dominance */
+.dombar{display:flex;height:20px;border-radius:5px;overflow:hidden;border:1px solid var(--ink)}
+.dombar i{display:block;height:100%}
+.domleg{display:flex;gap:0;margin-top:16px;justify-content:space-between}
+.domleg .it{display:flex;align-items:center;gap:11px}
+.domleg img{width:30px;height:30px;border-radius:50%}
+.domleg .v{font-family:'Bricolage Grotesque';font-size:26px;font-weight:800}
+.domleg .nm{font-size:12px;color:var(--muted);letter-spacing:1px;font-weight:700;text-transform:uppercase}
+/* prices */
+.pr{display:flex;align-items:center;padding:12px 0}
+.pr img{width:46px;height:46px;border-radius:50%;margin-right:16px}
+.pr .nm{font-family:'Bricolage Grotesque';font-size:26px;font-weight:800}
+.pr .tk{font-size:12px;color:var(--muted);letter-spacing:1px;font-weight:700}
+.pr .val{margin-left:auto;font-size:40px;font-weight:700;letter-spacing:-1px}
+.pr .chg{width:150px;text-align:right;font-size:22px;font-weight:700}
+/* movers */
+.therm{display:flex;gap:46px}
+.therm .col{flex:1}
+.mvhd{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.mvhd .h{font-size:15px;letter-spacing:2px;font-weight:700;text-transform:uppercase}
+.mrow{display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid rgba(27,24,19,.18)}
+.mrow .rk{font-size:14px;color:var(--muted);font-weight:700;width:16px}
+.mrow img{width:34px;height:34px;border-radius:50%}
+.mrow .sym{font-family:'Bricolage Grotesque';font-size:20px;font-weight:800}
+.mrow .mid{flex:1;min-width:0}
+.mrow .p{font-size:13px;color:var(--muted);margin-top:1px}
+.mrow .pct{font-size:20px;font-weight:700;text-align:right}
+/* footer */
+footer{display:flex;justify-content:space-between;align-items:flex-end;margin-top:6px}
+footer .src{font-size:13px;color:var(--muted);line-height:1.7;font-weight:700}
+footer .src b{color:var(--ink)}
+footer .stamp{text-align:right}
+footer .stamp .big{font-family:'Bricolage Grotesque';font-size:24px;font-weight:800}
+footer .stamp .small{font-size:12px;color:var(--cobalt);letter-spacing:1px;font-weight:700}
+</style></head>
+<body>
+<div class="paper-tex"></div><div class="corner"></div>
+<div class="mh-top"><div class="k">Boletim Diário do Mercado Cripto</div></div>
+<div class="mh-top">
+  <div class="title serif">Descomplica Cripto</div>
+  <div class="mh-r"><div class="ed">EDIÇÃO Nº {{EDICAO}}</div><div class="dt num">{{DATA}}</div><div class="hr">{{HORA}} BRT</div></div>
+</div>
+<div class="rule"></div>
+<div class="ticker">{{TICKER}}</div>
+<div class="rule"></div>
+
+<div class="kick"><span class="n serif">01</span><span class="t">Sentimento</span></div>
+<div class="sent">
+  <div class="col">
+    <div class="lab">Medo &amp; Ganância</div>
+    <div class="row"><div class="big" style="color:{{FNG_COLOR}}">{{FNG_VALUE}}</div><div class="cls" style="color:{{FNG_COLOR}}">{{FNG_LABEL}}</div></div>
+    <div class="bar fg"><div class="mk" style="left:{{FNG_POS}}%"></div></div>
+    <div class="bend"><span>MEDO</span><span>GANÂNCIA</span></div>
+  </div>
+  <div class="col">
+    <div class="lab">Altcoin Season</div>
+    <div class="row"><div class="big" style="color:{{AS_COLOR}}">{{AS_VALUE}}</div><div class="cls" style="color:{{AS_COLOR}}">{{AS_LABEL}}</div></div>
+    <div class="bar as"><div class="mk" style="left:{{AS_POS}}%"></div></div>
+    <div class="bend"><span>BITCOIN</span><span>ALTCOINS</span></div>
+  </div>
+</div>
+<div class="thin"></div>
+
+<div class="kick"><span class="n serif">02</span><span class="t">Dominância de Mercado</span></div>
+<div class="dombar">
+  <i style="width:{{DOM_BTC_W}}%;background:var(--btc)"></i>
+  <i style="width:{{DOM_ETH_W}}%;background:var(--eth)"></i>
+  <i style="width:{{DOM_ALT_W}}%;background:var(--alt)"></i>
+</div>
+<div class="domleg">
+  <div class="it"><img src="{{BTC_ICON}}"><div><div class="v">{{DOM_BTC}}%</div><div class="nm">Bitcoin</div></div></div>
+  <div class="it"><img src="{{ETH_ICON}}"><div><div class="v">{{DOM_ETH}}%</div><div class="nm">Ethereum</div></div></div>
+  <div class="it"><div style="width:30px;height:30px;border-radius:50%;background:var(--alt)"></div><div><div class="v">{{DOM_ALT}}%</div><div class="nm">Altcoins</div></div></div>
+</div>
+<div class="thin"></div>
+
+<div class="kick"><span class="n serif">03</span><span class="t">Preços de Referência</span></div>
+<div class="pr"><img src="{{BTC_ICON}}"><div><div class="nm">Bitcoin</div><div class="tk">BTC / USD</div></div><div class="val num">US$ {{BTC_PRICE}}</div><div class="chg {{BTC_COLOR}}">{{BTC_ARROW}} {{BTC_CHG}}%</div></div>
+<div style="height:1px;background:rgba(27,24,19,.18)"></div>
+<div class="pr"><img src="{{ETH_ICON}}"><div><div class="nm">Ethereum</div><div class="tk">ETH / USD</div></div><div class="val num">US$ {{ETH_PRICE}}</div><div class="chg {{ETH_COLOR}}">{{ETH_ARROW}} {{ETH_CHG}}%</div></div>
+<div class="thin"></div>
+
+<div class="kick"><span class="n serif">04</span><span class="t">Termômetro · 24 Horas</span></div>
+<div class="therm">
+  <div class="col">
+    <div class="mvhd"><span class="h up">▲ Maiores Altas</span><span class="k">24H</span></div>
+    {{GAINERS}}
+  </div>
+  <div class="col">
+    <div class="mvhd"><span class="h dn">▼ Maiores Quedas</span><span class="k">24H</span></div>
+    {{LOSERS}}
+  </div>
+</div>
+<div class="rule"></div>
+
+<footer>
+  <div class="src"><span>Fontes — <b>alternative.me · CoinGecko · CoinMarketCap</b></span><br><span>Dados em {{DATA}} {{HORA}} BRT · Não constitui recomendação de investimento.</span></div>
+  <div class="stamp"><div class="big serif">Descomplica Cripto</div><div class="small">t.me/descomplicacripto</div></div>
+</footer>
+</body></html>
