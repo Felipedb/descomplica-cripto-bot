@@ -346,7 +346,7 @@ def _cap_movers(items, positive):
     sign = "+" if positive else "-"
     emoji = "\U0001F7E2" if positive else "\U0001F534"
     out = []
-    for c in items[:3]:
+    for c in items[:5]:
         sym = htmllib.escape(c["symbol"].upper()[:10])
         out.append(f"\u2022 {sym}: {emoji} {sign}{br_num(abs(c['price_change_percentage_24h']), 2)}%")
     return out
