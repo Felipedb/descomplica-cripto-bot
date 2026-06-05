@@ -338,27 +338,67 @@ def render_card_png(html, out_path):
     return out_path
 
 
-def build_text_fallback(fng, glob, altseason, btc, eth):
-    """Resumo curto em texto, usado se a imagem nao puder ser gerada/enviada."""
+def fmt_chg(v):
+    return ("\U0001F7E2 +" if v >= 0 else "\U0001F534 -") + br_num(abs(v), 2) + "%"
+
+
+def _cap_movers(items, positive):
+    sign = "+" if positive else "-"
+    emoji = "\U0001F7E2" if positive else "\U0001F534"
+    out = []
+    for c in items[:3]:
+        sym = htmllib.escape(c["symbol"].upper()[:10])
+        out.append(f"\u2022 {sym}: {emoji} {sign}{br_num(abs(c['price_change_percentage_24h']), 2)}%")
+    return out
+
+
+def build_caption(fng, glob, altseason, btc, eth, gainers, losers):
+    """Legenda completa em texto, enviada junto com a imagem."""
     now = datetime.now(BRT).strftime("%d/%m/%Y")
-    L = [f"📊 <b>Status Cripto</b> — {now}"]
+
+    def pc(c):
+        return (c.get("price_change_percentage_24h") or 0) if c else 0
+
+    L = [f"\U0001F4CA <b>Status Cripto</b> \u2014 {now}", ""]
     if fng:
-        L.append(f"Medo &amp; Ganância: {fng['value']}/100 ({htmllib.escape(fng['pt'])})")
-    if altseason:
-        L.append(f"Altcoin Season: {altseason['index']}/100 ({htmllib.escape(altseason['label'])})")
+        L += [f"\U0001F631 <b>Fear &amp; Greed:</b> {fng['value']}/100 ({htmllib.escape(fng['pt'])})", ""]
     if glob:
-        L.append(f"Dominância BTC {glob['btc_dominance']:.1f}% · ETH {glob['eth_dominance']:.1f}%")
-        L.append(f"Market Cap: US$ {fmt_mcap(glob['total_mcap_usd'])} ({glob['mcap_change_24h']:+.2f}%)")
-    if btc:
-        L.append(f"BTC US$ {fmt_price(btc['current_price'])} ({btc.get('price_change_percentage_24h') or 0:+.2f}%)")
-    if eth:
-        L.append(f"ETH US$ {fmt_price(eth['current_price'])} ({eth.get('price_change_percentage_24h') or 0:+.2f}%)")
-    return "\n".join(L)
+        L += ["\U0001F451 <b>Domin\u00e2ncia</b>",
+              f"\u2022 Bitcoin: {br_num(glob['btc_dominance'], 1)}%",
+              f"\u2022 Ethereum: {br_num(glob['eth_dominance'], 1)}%",
+              f"\u2022 Demais altcoins: {br_num(glob['alt_dominance'], 1)}%", ""]
+    if altseason:
+        L += [f"\u2696\uFE0F <b>Altcoin Season Index:</b> {altseason['index']}/100 ({htmllib.escape(altseason['label'])})",
+              "<i>top 100 altcoins vs BTC nos \u00faltimos 90 dias</i>", ""]
+    if btc or eth:
+        L.append("\U0001F4B0 <b>Pre\u00e7os</b>")
+        if btc:
+            L.append(f"\u2022 BTC: US$ {fmt_coin_price(btc['current_price'])} ({fmt_chg(pc(btc))})")
+        if eth:
+            L.append(f"\u2022 ETH: US$ {fmt_coin_price(eth['current_price'])} ({fmt_chg(pc(eth))})")
+        L.append("")
+    if glob:
+        L += ["\U0001F310 <b>Market Cap Total</b>",
+              f"\u2022 US$ {fmt_mcap(glob['total_mcap_usd'])} ({fmt_chg(glob['mcap_change_24h'])} em 24h)", ""]
+    if gainers:
+        L.append("\U0001F680 <b>Maiores Altas (24h)</b>")
+        L += _cap_movers(gainers, True)
+        L.append("")
+    if losers:
+        L.append("\U0001F4C9 <b>Maiores Quedas (24h)</b>")
+        L += _cap_movers(losers, False)
+        L.append("")
+    L.append("<i>Fontes: alternative.me, CoinGecko e CoinMarketCap</i>")
+    cap = "\n".join(L).strip()
+    if len(cap) > 1024:
+        cap = cap[:1015].rstrip() + "\u2026"
+    return cap
 
 
 # ---------------------------------------------------------------------------
 # Envio ao Telegram
 # ---------------------------------------------------------------------------
+
 
 def _creds():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -430,7 +470,7 @@ def main():
     args = ap.parse_args()
 
     fng, glob, altseason, btc, eth, gainers, losers = collect()
-    caption = f"\U0001F4CA Panorama do mercado cripto • {datetime.now(BRT).strftime('%d/%m/%Y')}"
+    caption = build_caption(fng, glob, altseason, btc, eth, gainers, losers)
 
     try:
         html = build_card_html(fng, glob, altseason, btc, eth, gainers, losers)
@@ -440,7 +480,7 @@ def main():
         print(f"AVISO: falha ao gerar a imagem ({e}); usando texto.", file=sys.stderr)
         if args.dry_run:
             raise
-        send_text(build_text_fallback(fng, glob, altseason, btc, eth))
+        send_text(caption)
         return
 
     if args.dry_run:
@@ -450,7 +490,7 @@ def main():
             send_photo(out, caption)
         except Exception as e:  # noqa: BLE001
             print(f"AVISO: falha ao enviar imagem ({e}); enviando texto.", file=sys.stderr)
-            send_text(build_text_fallback(fng, glob, altseason, btc, eth))
+            send_text(caption)
 
 
 if __name__ == "__main__":
