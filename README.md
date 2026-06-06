@@ -73,11 +73,37 @@ O workflow instala o Chromium automaticamente (`playwright install --with-deps c
 
 | Arquivo | Função |
 |---|---|
-| `crypto_bot.py` | Coleta os dados, monta o card e envia a imagem |
+| `crypto_bot.py` | Boletim diário: coleta dados, monta o card e envia a imagem |
 | `card_template.html` | Template visual (boletim editorial) do card |
-| `requirements.txt` | Dependências (requests, playwright) |
-| `.github/workflows/daily.yml` | Agendamento diário na nuvem |
+| `news_bot.py` | Bot de notícias: posta manchetes novas a cada 30 min |
+| `seen_news.json` | Estado das notícias já postadas (evita repetir) |
+| `requirements.txt` | Dependências (requests, playwright, deep-translator) |
+| `.github/workflows/daily.yml` | Agendamento do boletim diário (18h BRT) |
+| `.github/workflows/news.yml` | Agendamento do bot de notícias (30 em 30 min) |
 | `.env.example` | Modelo das variáveis para rodar local |
+
+## Segundo bot: Notícias automáticas (news_bot.py)
+
+Além do boletim diário, há um segundo bot que publica **notícias** ao longo do dia, no estilo de canais como o BitNada: cada notícia vira uma mensagem com imagem + manchete + fonte + as suas redes no rodapé (YouTube, Instagram, X).
+
+Ele mescla duas fontes:
+
+- **Portais BR (RSS, já em português):** BeInCrypto Brasil, Livecoins, Portal do Bitcoin, CriptoFácil, Cointimes e Cointelegraph (global, traduzido para PT).
+- **Perfis de cripto no X (gratuito, via Nitter):** o texto vem em inglês e é traduzido. Esta é a parte **frágil**: as instâncias Nitter caem com frequência. Se nenhuma responder, o bot simplesmente ignora o X naquela rodada e segue com os portais, sem erro.
+
+Para **não repetir** notícia, o bot guarda em `seen_news.json` o que já foi postado. Na primeira execução ele posta só 1 item (para não inundar o canal) e marca o resto como visto.
+
+Destino: crie o secret **`TELEGRAM_NEWS_CHAT_ID`** com o canal/grupo das notícias (pode ser o mesmo `@descomplicabtc` ou um novo canal só de notícias). Se ficar vazio, usa o `TELEGRAM_CHAT_ID`.
+
+Testar local (não envia):
+
+```bash
+python news_bot.py --dry-run
+```
+
+Agendamento: `.github/workflows/news.yml` roda de 30 em 30 min e salva o estado de volta no repositório (precisa de `permissions: contents: write`, já configurado no workflow).
+
+Para ajustar: edite no topo do `news_bot.py` as listas `RSS_FEEDS` (portais), `X_ACCOUNTS` (perfis do X), `NITTER_INSTANCES` (espelhos do X) e `SOCIAL` (suas redes).
 
 ## Segurança
 
