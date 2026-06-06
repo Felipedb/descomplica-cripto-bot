@@ -1,0 +1,45 @@
+name: Noticias Cripto (a cada 30min)
+
+on:
+  schedule:
+    # a cada 30 minutos
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+# precisa de write para salvar o estado (seen_news.json) de volta no repo
+permissions:
+  contents: write
+
+# evita duas execucoes simultaneas mexendo no estado ao mesmo tempo
+concurrency:
+  group: noticias
+  cancel-in-progress: false
+
+jobs:
+  noticias:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Postar noticias novas
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_NEWS_CHAT_ID: ${{ secrets.TELEGRAM_NEWS_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python news_bot.py
+      - name: Salvar estado (noticias ja vistas)
+        run: |
+          if [[ -n "$(git status --porcelain seen_news.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add seen_news.json
+            git commit -m "estado: noticias vistas [skip ci]"
+            git push
+          else
+            echo "sem mudancas no estado"
+          fi
