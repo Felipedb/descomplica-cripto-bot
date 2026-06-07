@@ -1,25 +1,36 @@
-name: Noticias Cripto (a cada 15min)
+name: Noticias Cripto (worker continuo)
+
+# Worker continuo para repositorio PUBLICO (Actions ilimitado).
+# Um unico job vive ~5h e, dentro dele, roda o bot a cada 15 min via "sleep".
+# Assim o ritmo dos posts NAO depende da pontualidade do cron do GitHub
+# (que neste repo entregava ~1 execucao a cada 90 min).
+#
+# IMPORTANTE: so ative este workflow com o repositorio PUBLICO. Em repo privado
+# um job de ~5h consome ~300 min e esgota a cota gratuita (2000 min/mes) em
+# poucos dias.
 
 on:
   schedule:
-    # a cada 15 min: o cron do GitHub atrasa/pula execucoes; rodar mais vezes
-    # encurta o intervalo efetivo entre os posts.
-    - cron: "*/15 * * * *"
+    # Rede de seguranca: reinicia o worker caso ele caia. O "concurrency" abaixo
+    # garante que, se ja houver um rodando, o novo fica na fila e assume assim
+    # que o atual termina (sem buraco no fluxo).
+    - cron: "0 * * * *"
   workflow_dispatch: {}
 
-# precisa de write para salvar o estado (seen_news.json) de volta no repo
+# precisa de write para commitar o estado (seen_news.json) de volta no repo
 permissions:
   contents: write
 
-# evita duas execucoes simultaneas mexendo no estado ao mesmo tempo
+# no maximo um worker por vez; os disparos extras esperam e assumem na sequencia
 concurrency:
   group: noticias
   cancel-in-progress: false
 
 jobs:
-  noticias:
+  worker:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # ~5h45 de teto duro; o proprio loop encerra antes (limite do GitHub e 6h).
+    timeout-minutes: 345
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,26 +38,28 @@ jobs:
           python-version: "3.12"
       - name: Instalar dependencias
         run: pip install -r requirements.txt
-      - name: Postar noticias novas
+      - name: Worker (1 post a cada ~15 min, commitando o estado)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_NEWS_CHAT_ID: ${{ secrets.TELEGRAM_NEWS_CHAT_ID }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 1 post por execucao: evita a rajada de varias noticias no mesmo minuto
           NEWS_PER_RUN: "1"
-        run: python news_bot.py
-      - name: Salvar estado (noticias ja vistas)
+          # trava de 14 min: como o loop roda a cada 15 min, sai ~1 post por ciclo
+          NEWS_MIN_GAP_MIN: "14"
         run: |
-          if [[ -n "$(git status --porcelain seen_news.json)" ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add seen_news.json
-            git commit -m "estado: noticias vistas [skip ci]"
-            git push
-          else
-            echo "sem mudancas no estado"
-          fi
-
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # roda por ~5h e encerra limpo; o proximo run (na fila) assume o loop
+          FIM=$(( SECONDS + 18000 ))
+          while [ $SECONDS -lt $FIM ]; do
+            python news_bot.py || true
+            if [[ -n "$(git status --porcelain seen_news.json)" ]]; then
+              git add seen_news.json
+              git commit -m "estado: noticias vistas [skip ci]" || true
+              git push || (git pull --rebase --autostash && git push) || true
+            fi
+            sleep 900
+          done
       - name: Avisar no Telegram se algo falhou
         if: failure()
         env:
@@ -59,6 +72,6 @@ jobs:
             curl -s -X POST \
               "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${DEST}" \
-              --data-urlencode "text=⚠️ Workflow de noticias falhou (run ${GITHUB_RUN_ID}). Veja os logs em Actions." \
+              --data-urlencode "text=⚠️ Worker de noticias caiu (run ${GITHUB_RUN_ID}). Veja os logs em Actions." \
               >/dev/null || true
           fi
