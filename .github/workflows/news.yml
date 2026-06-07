@@ -1,7 +1,7 @@
 name: Noticias Cripto (worker continuo)
 
 # Worker continuo para repositorio PUBLICO (Actions ilimitado).
-# Um unico job vive ~5h e, dentro dele, roda o bot a cada 15 min via "sleep".
+# Um unico job vive ~5h e, dentro dele, roda o bot a cada 30 min via "sleep".
 # Assim o ritmo dos posts NAO depende da pontualidade do cron do GitHub
 # (que neste repo entregava ~1 execucao a cada 90 min).
 #
@@ -38,14 +38,14 @@ jobs:
           python-version: "3.12"
       - name: Instalar dependencias
         run: pip install -r requirements.txt
-      - name: Worker (1 post a cada ~15 min, commitando o estado)
+      - name: Worker (1 post a cada ~30 min, commitando o estado)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_NEWS_CHAT_ID: ${{ secrets.TELEGRAM_NEWS_CHAT_ID }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NEWS_PER_RUN: "1"
-          # trava de 14 min: como o loop roda a cada 15 min, sai ~1 post por ciclo
-          NEWS_MIN_GAP_MIN: "14"
+          # trava de 28 min: como o loop roda a cada 30 min, sai ~1 post por ciclo
+          NEWS_MIN_GAP_MIN: "28"
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -58,7 +58,7 @@ jobs:
               git commit -m "estado: noticias vistas [skip ci]" || true
               git push || (git pull --rebase --autostash && git push) || true
             fi
-            sleep 900
+            sleep 1800
           done
       - name: Avisar no Telegram se algo falhou
         if: failure()
