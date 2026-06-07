@@ -17,15 +17,27 @@ Evita repetir noticia usando um estado local (seen_news.json).
 Feito para rodar a cada 30 min no GitHub Actions.
 
 Uso:
-  python news_bot.py                 # coleta e posta as novidades no Telegram
+  python news_bot.py                 # solta ate NEWS_PER_RUN noticia(s) da fila
   python news_bot.py --dry-run       # so mostra o que postaria (nao envia, nao salva estado)
-  python news_bot.py --limit 5       # maximo de posts nesta rodada (padrao 6)
+  python news_bot.py --limit 1       # maximo de posts nesta rodada (padrao: NEWS_PER_RUN ou 1)
+  python news_bot.py --loop          # roda continuamente (1 post a cada LOOP_INTERVAL s)
   ENABLE_X=0 python news_bot.py      # desliga a captura do X (so portais)
 
-Variaveis de ambiente (para envio):
+Estrategia de entrega (gotejamento):
+  O bot mantem uma FILA de noticias pendentes em seen_news.json e solta poucas
+  por execucao (padrao 1), priorizando as mais recentes. Assim, mesmo quando o
+  agendador (cron do GitHub Actions) atrasa ou acumula rodadas, o canal recebe
+  um fluxo espacado em vez de rajadas. Para fluxo perfeitamente regular, rode
+  com --loop em um servidor sempre-ligado.
+
+Variaveis de ambiente:
   TELEGRAM_BOT_TOKEN       -> token do bot do @BotFather
   TELEGRAM_NEWS_CHAT_ID    -> destino das noticias (ex.: @meucanal). Se vazio,
                               usa TELEGRAM_CHAT_ID como fallback.
+  TELEGRAM_CHAT_ID         -> fallback do destino e alvo dos alertas de falha
+  NEWS_PER_RUN             -> quantas noticias soltar por execucao (padrao 1)
+  LOOP_INTERVAL            -> segundos entre ciclos no modo --loop (padrao 900)
+  ENABLE_X                 -> 0 desliga a captura do X
 """
 
 import os
@@ -93,7 +105,29 @@ NITTER_INSTANCES = [
 ]
 
 MAX_SEEN = 800          # quantos IDs guardar no estado (poda os mais antigos)
+MAX_QUEUE = 20          # tamanho maximo da fila de pendentes (poda os menos relevantes)
 CAPTION_LIMIT = 1024    # limite de caracteres da legenda no sendPhoto
+
+# quantas noticias soltar por execucao (gotejamento). 1 evita rajadas.
+PER_RUN_DEFAULT = max(1, int(os.environ.get("NEWS_PER_RUN", "1") or "1"))
+
+# intervalo minimo entre posts (minutos). Com cron */15, garante ~1 a cada 30 min
+# mesmo quando o agendador do GitHub adianta, atrasa ou acumula execucoes.
+MIN_GAP_MIN = max(1, int(os.environ.get("NEWS_MIN_GAP_MIN", "28") or "28"))
+
+# Relevancia: noticia com esses termos no titulo/resumo sobe na fila e e postada
+# antes das demais. Pesos maiores = assuntos mais "quentes".
+RELEVANCE = {
+    "bitcoin": 3, "btc": 3, "ethereum": 2, "eth": 2, "etf": 3, "sec": 2,
+    "halving": 3, "blackrock": 3, "fed": 2, "regula": 2, "hack": 2,
+    "recorde": 3, "maxima": 2, "máxima": 2, "all-time": 3, "ath": 2,
+    "bilhao": 2, "bilhão": 2, "bilhoes": 2, "bilhões": 2,
+    "trilhao": 3, "trilhão": 3, "trilhoes": 3, "trilhões": 3,
+    "aprova": 2, "dispara": 2, "despenca": 2, "rompe": 1, "trump": 2,
+    "binance": 2, "coinbase": 2, "microstrategy": 2, "strategy": 2,
+    "saylor": 2, "ataque": 2, "roubo": 2, "golpe": 2, "processo": 1,
+    "alta": 1, "queda": 1, "salto": 1, "tombo": 1, "lei": 1, "ouro": 1,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -249,19 +283,29 @@ def translate_en_pt(text):
 # Estado (evita repetir noticia)
 # ---------------------------------------------------------------------------
 
-def load_seen():
+def load_state():
+    """Le o estado. Retrocompativel com formatos antigos.
+
+    Retorna (ids, queue, last_post_ts). A fila guarda itens completos ainda nao
+    postados; last_post_ts e o epoch do ultimo envio (para a trava de tempo).
+    """
     try:
         with open(STATE_PATH, encoding="utf-8") as f:
             data = json.load(f)
-            return list(data.get("ids", []))
+        ids = list(data.get("ids", []))
+        queue = [q for q in data.get("queue", [])
+                 if isinstance(q, dict) and q.get("id")
+                 and q.get("title") and q.get("link")]
+        last_ts = float(data.get("last_post_ts", 0) or 0)
+        return ids, queue, last_ts
     except Exception:  # noqa: BLE001
-        return []
+        return [], [], 0.0
 
 
-def save_seen(ids):
-    ids = ids[-MAX_SEEN:]
+def save_state(ids, queue, last_ts):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump({"ids": ids}, f, ensure_ascii=False)
+        json.dump({"ids": ids[-MAX_SEEN:], "queue": queue[:MAX_QUEUE],
+                   "last_post_ts": last_ts}, f, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -365,12 +409,126 @@ def _title_key(title):
     return re.sub(r"\W+", "", (title or "").lower())[:60]
 
 
+def relevance_score(item):
+    """Nota de relevancia pela presenca de termos de peso no titulo/resumo."""
+    text = ((item.get("title") or "") + " " + (item.get("summary") or "")).lower()
+    return sum(w for kw, w in RELEVANCE.items() if kw in text)
+
+
+def _alert_failure(err):
+    """Best-effort: avisa o admin no Telegram que a rodada falhou."""
+    admin = os.environ.get("TELEGRAM_CHAT_ID", "").strip() or TG_CHAT
+    if not TG_TOKEN or not admin:
+        return
+    try:
+        msg = f"⚠️ news_bot falhou: {type(err).__name__}: {str(err)[:300]}"
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            data={"chat_id": admin, "text": msg},
+            timeout=15,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def run_once(per_run, dry_run=False):
+    """Uma rodada: coleta, enfileira novidades, ordena por relevancia e (se a
+    trava de tempo permitir) solta ate `per_run` noticia(s) do topo da fila.
+
+    - A fila e ordenada por relevancia (RELEVANCE): a mais "quente" sai antes.
+    - Uma noticia so e marcada como vista quando postada; o resto fica na fila.
+    - A trava (MIN_GAP_MIN) garante ~1 post a cada 30 min mesmo com o cron */15
+      e com os atrasos/adiantamentos do agendador do GitHub.
+    Retorna o numero de itens postados.
+    """
+    seen, queue, last_ts = load_state()
+    seen_set = set(seen)
+    queued_ids = {q["id"] for q in queue}
+
+    items = collect()
+    fresh = 0
+    for it in items:
+        if it["id"] in seen_set or it["id"] in queued_ids:
+            continue
+        it["score"] = relevance_score(it)
+        queue.append(it)
+        queued_ids.add(it["id"])
+        fresh += 1
+
+    # dedup defensivo + garante score nos itens que ja estavam na fila
+    seen_q, deduped = set(), []
+    for q in queue:
+        if q["id"] in seen_q or q["id"] in seen_set:
+            continue
+        if "score" not in q:
+            q["score"] = relevance_score(q)
+        seen_q.add(q["id"])
+        deduped.append(q)
+    # ordena por relevancia (desc); empate mantem ordem de chegada (estavel)
+    deduped.sort(key=lambda q: q.get("score", 0), reverse=True)
+    queue = deduped[:MAX_QUEUE]
+
+    now = time.time()
+    gap_left = MIN_GAP_MIN * 60 - (now - last_ts)
+    print(f"coletados {len(items)} | novos {fresh} | fila {len(queue)} | "
+          f"gap_restante {max(0, int(gap_left / 60))}min", file=sys.stderr)
+
+    # trava de tempo: so posta se ja passou o intervalo minimo desde o ultimo post
+    if gap_left > 0 and not dry_run:
+        save_state(seen, queue, last_ts)
+        print("postados 0 (trava de tempo ativa)", file=sys.stderr)
+        return 0
+
+    posted = 0
+    used_titles = set()
+    while queue and posted < per_run:
+        it = queue[0]
+        tk = _title_key(it["title"])
+        if tk in used_titles:
+            queue.pop(0)
+            continue
+        if dry_run:
+            tag = "[traduz EN]" if it.get("lang") == "en" else ""
+            print(f"\nDRY score={it.get('score')} {it['source']} {tag}  "
+                  f"{it['title'][:85]}", file=sys.stderr)
+            used_titles.add(tk)
+            queue.pop(0)
+            posted += 1
+            continue
+        if send_item(it):
+            used_titles.add(tk)
+            seen.append(it["id"])
+            seen_set.add(it["id"])
+            queue.pop(0)
+            last_ts = time.time()
+            posted += 1
+            time.sleep(2)
+        else:
+            # Falha de envio: tenta de novo na proxima rodada. Apos 3 tentativas
+            # descarta o item para nao travar a fila.
+            it["tries"] = int(it.get("tries", 0)) + 1
+            if it["tries"] >= 3:
+                print(f"  [drop] desistindo de {it['id']} apos {it['tries']} "
+                      f"tentativas", file=sys.stderr)
+                seen.append(it["id"])
+                seen_set.add(it["id"])
+                queue.pop(0)
+            break
+
+    if not dry_run:
+        save_state(seen, queue, last_ts)
+    print(f"postados {posted} | fila_restante {len(queue)}", file=sys.stderr)
+    return posted
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="mostra o que postaria, sem enviar nem salvar estado")
-    ap.add_argument("--limit", type=int, default=6,
-                    help="maximo de posts nesta rodada")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="maximo de posts nesta rodada (padrao: NEWS_PER_RUN ou 1)")
+    ap.add_argument("--loop", action="store_true",
+                    help="roda continuamente, 1 post a cada LOOP_INTERVAL s")
     args = ap.parse_args()
 
     if not args.dry_run and (not TG_TOKEN or not TG_CHAT):
@@ -378,47 +536,26 @@ def main():
               "(ou rode com --dry-run).", file=sys.stderr)
         sys.exit(1)
 
-    seen = load_seen()
-    seen_set = set(seen)
-    first_run = len(seen_set) == 0
+    per_run = max(1, args.limit if args.limit is not None else PER_RUN_DEFAULT)
 
-    items = collect()
-    new = [it for it in items if it["id"] not in seen_set]
-    print(f"coletados {len(items)} | novos {len(new)} | primeira_execucao={first_run}",
+    if not args.loop:
+        try:
+            run_once(per_run, dry_run=args.dry_run)
+        except Exception as e:  # noqa: BLE001
+            _alert_failure(e)
+            raise
+        return
+
+    interval = max(60, int(os.environ.get("LOOP_INTERVAL", "900") or "900"))
+    print(f"modo loop: 1 ciclo a cada {interval}s (per_run={per_run})",
           file=sys.stderr)
-
-    # na primeira execucao evita inundar o canal: posta no maximo 1
-    limit = 1 if first_run else args.limit
-
-    posted = 0
-    used_titles = set()
-    for it in new:
-        if posted >= limit:
-            break
-        tk = _title_key(it["title"])
-        if tk in used_titles:
-            continue
-        if args.dry_run:
-            tag = "[traduz EN]" if it["lang"] == "en" else ""
-            print(f"\nDRY {it['source']} {tag}")
-            print(f"  {it['title'][:100]}")
-            print(f"  img={bool(it['image'])} {it['link']}")
-            used_titles.add(tk)
-            posted += 1
-            continue
-        if send_item(it):
-            used_titles.add(tk)
-            posted += 1
-            time.sleep(2)
-
-    if not args.dry_run:
-        for it in items:
-            if it["id"] not in seen_set:
-                seen.append(it["id"])
-                seen_set.add(it["id"])
-        save_seen(seen)
-
-    print(f"postados {posted}", file=sys.stderr)
+    while True:
+        try:
+            run_once(per_run, dry_run=args.dry_run)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [loop] rodada falhou: {e}", file=sys.stderr)
+            _alert_failure(e)
+        time.sleep(interval)
 
 
 if __name__ == "__main__":
