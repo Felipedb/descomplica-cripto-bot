@@ -1,9 +1,10 @@
-name: Noticias Cripto (a cada 30min)
+name: Noticias Cripto (a cada 15min)
 
 on:
   schedule:
-    # a cada 30 minutos
-    - cron: "*/30 * * * *"
+    # a cada 15 min: o cron do GitHub atrasa/pula execucoes; rodar mais vezes
+    # encurta o intervalo efetivo entre os posts.
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 # precisa de write para salvar o estado (seen_news.json) de volta no repo
@@ -31,6 +32,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_NEWS_CHAT_ID: ${{ secrets.TELEGRAM_NEWS_CHAT_ID }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 1 post por execucao: evita a rajada de varias noticias no mesmo minuto
+          NEWS_PER_RUN: "1"
         run: python news_bot.py
       - name: Salvar estado (noticias ja vistas)
         run: |
@@ -42,4 +45,20 @@ jobs:
             git push
           else
             echo "sem mudancas no estado"
+          fi
+
+      - name: Avisar no Telegram se algo falhou
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_NEWS_CHAT_ID: ${{ secrets.TELEGRAM_NEWS_CHAT_ID }}
+        run: |
+          DEST="${TELEGRAM_CHAT_ID:-$TELEGRAM_NEWS_CHAT_ID}"
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$DEST" ]; then
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${DEST}" \
+              --data-urlencode "text=⚠️ Workflow de noticias falhou (run ${GITHUB_RUN_ID}). Veja os logs em Actions." \
+              >/dev/null || true
           fi
