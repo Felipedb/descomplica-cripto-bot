@@ -14,6 +14,8 @@ Mescla duas fontes e posta cada noticia nova como imagem + legenda no Telegram:
      o bot simplesmente ignora o X naquela rodada e segue com os portais.
 
 Evita repetir noticia usando um estado local (seen_news.json).
+Ignora noticia com mais de NEWS_MAX_AGE_H horas (padrao 8): nada de materia
+velha entra na coleta, e item parado na fila expira em vez de ser postado.
 Feito para rodar a cada 30 min no GitHub Actions.
 
 Uso:
@@ -36,6 +38,7 @@ Variaveis de ambiente:
                               usa TELEGRAM_CHAT_ID como fallback.
   TELEGRAM_CHAT_ID         -> fallback do destino e alvo dos alertas de falha
   NEWS_PER_RUN             -> quantas noticias soltar por execucao (padrao 1)
+  NEWS_MAX_AGE_H           -> idade maxima (horas) de noticia aceita (padrao 8)
   LOOP_INTERVAL            -> segundos entre ciclos no modo --loop (padrao 900)
   ENABLE_X                 -> 0 desliga a captura do X
 """
@@ -48,6 +51,7 @@ import time
 import html as htmllib
 import argparse
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as ET
 
 import requests
@@ -104,9 +108,14 @@ NITTER_INSTANCES = [
     "nitter.tiekoetter.com",
 ]
 
-MAX_SEEN = 800          # quantos IDs guardar no estado (poda os mais antigos)
+MAX_SEEN = 2000         # quantos IDs guardar no estado (poda os mais antigos)
 MAX_QUEUE = 20          # tamanho maximo da fila de pendentes (poda os menos relevantes)
+MAX_TITLES = 150        # historico de manchetes postadas (dedup entre fontes)
 CAPTION_LIMIT = 1024    # limite de caracteres da legenda no sendPhoto
+
+# Idade maxima de noticia (horas). Mais velha que isso nao entra na coleta e
+# expira da fila. E o que impede o bot de postar materia antiga.
+MAX_AGE_H = max(1, int(os.environ.get("NEWS_MAX_AGE_H", "8") or "8"))
 
 # quantas noticias soltar por execucao (gotejamento). 1 evita rajadas.
 PER_RUN_DEFAULT = max(1, int(os.environ.get("NEWS_PER_RUN", "1") or "1"))
@@ -155,9 +164,38 @@ def clean_text(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+def parse_pubdate(s):
+    """Converte data RFC-822 (RSS) ou ISO-8601 em epoch. 0.0 se ilegivel."""
+    s = (s or "").strip()
+    if not s:
+        return 0.0
+    try:
+        dt = parsedate_to_datetime(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def too_old(pub_ts):
+    """True se a data de publicacao passou da idade maxima (MAX_AGE_H)."""
+    return bool(pub_ts) and (time.time() - pub_ts) > MAX_AGE_H * 3600
+
+
 # ---------------------------------------------------------------------------
 # Coleta: portais BR (RSS)
 # ---------------------------------------------------------------------------
+
+_IMG_EXT = re.compile(r"\.(jpg|jpeg|png|webp|gif)(\?|$)", re.I)
+
 
 def _extract_image(item, desc_html):
     """Tenta achar a URL de uma imagem no item do RSS."""
@@ -166,9 +204,13 @@ def _extract_image(item, desc_html):
         url = tag.get("url") if hasattr(tag, "get") else None
         if not url:
             continue
-        if t.endswith("content") and "image" in (tag.get("type") or "image"):
-            return url
-        if t.endswith("thumbnail"):
+        if t.endswith("content"):
+            typ = (tag.get("type") or "").lower()
+            # so aceita como imagem se o type diz "image" ou, sem type, a URL
+            # tem extensao de imagem (evita pegar video/audio como foto)
+            if "image" in typ or (not typ and _IMG_EXT.search(url)):
+                return url
+        elif t.endswith("thumbnail"):
             return url
     enc = item.find("enclosure")
     if enc is not None and "image" in (enc.get("type") or ""):
@@ -189,6 +231,11 @@ def fetch_rss(name, url, lang="pt"):
         title = clean_text(it.findtext("title"))
         link = (it.findtext("link") or "").strip()
         guid = (it.findtext("guid") or link).strip()
+        pub_ts = parse_pubdate(
+            it.findtext("pubDate")
+            or it.findtext("{http://purl.org/dc/elements/1.1/}date"))
+        if too_old(pub_ts):
+            continue  # materia mais velha que MAX_AGE_H nao entra
         desc_html = (it.findtext("{http://purl.org/rss/1.0/modules/content/}encoded")
                      or it.findtext("description") or "")
         summary = clean_text(desc_html)
@@ -203,6 +250,7 @@ def fetch_rss(name, url, lang="pt"):
             "image": image,
             "source": name,
             "lang": lang,
+            "pub_ts": pub_ts,
         })
     return items
 
@@ -241,6 +289,9 @@ def fetch_x_account(user):
             # ignora respostas e retweets (comecam com "R to @" / "RT by")
             if text.lower().startswith(("r to @", "rt by")):
                 continue
+            pub_ts = parse_pubdate(it.findtext("pubDate"))
+            if too_old(pub_ts):
+                continue  # descarta tweet velho (inclui os fixados/pinned)
             m = re.search(r"/status/(\d+)", link)
             tid = m.group(1) if m else link
             desc_html = it.findtext("description") or ""
@@ -255,6 +306,7 @@ def fetch_x_account(user):
                 "image": image,
                 "source": "@" + user,
                 "lang": "en",
+                "pub_ts": pub_ts,
             })
         if items:
             return items
@@ -286,8 +338,9 @@ def translate_en_pt(text):
 def load_state():
     """Le o estado. Retrocompativel com formatos antigos.
 
-    Retorna (ids, queue, last_post_ts). A fila guarda itens completos ainda nao
-    postados; last_post_ts e o epoch do ultimo envio (para a trava de tempo).
+    Retorna (ids, queue, last_post_ts, titles). A fila guarda itens completos
+    ainda nao postados; last_post_ts e o epoch do ultimo envio (trava de
+    tempo); titles e o historico de manchetes postadas (dedup entre fontes).
     """
     try:
         with open(STATE_PATH, encoding="utf-8") as f:
@@ -297,15 +350,17 @@ def load_state():
                  if isinstance(q, dict) and q.get("id")
                  and q.get("title") and q.get("link")]
         last_ts = float(data.get("last_post_ts", 0) or 0)
-        return ids, queue, last_ts
+        titles = [t for t in data.get("titles", []) if isinstance(t, str)]
+        return ids, queue, last_ts, titles
     except Exception:  # noqa: BLE001
-        return [], [], 0.0
+        return [], [], 0.0, []
 
 
-def save_state(ids, queue, last_ts):
+def save_state(ids, queue, last_ts, titles):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump({"ids": ids[-MAX_SEEN:], "queue": queue[:MAX_QUEUE],
-                   "last_post_ts": last_ts}, f, ensure_ascii=False)
+                   "last_post_ts": last_ts,
+                   "titles": titles[-MAX_TITLES:]}, f, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -441,41 +496,73 @@ def run_once(per_run, dry_run=False):
       e com os atrasos/adiantamentos do agendador do GitHub.
     Retorna o numero de itens postados.
     """
-    seen, queue, last_ts = load_state()
+    seen, queue, last_ts, titles = load_state()
     seen_set = set(seen)
+    titles_set = set(titles)
     queued_ids = {q["id"] for q in queue}
 
     items = collect()
+    now = time.time()
+
+    # Primeiro run (estado totalmente vazio): nao despejar o backlog dos feeds
+    # como se fosse novidade. Estreia com 1 item (o mais relevante) e marca o
+    # resto como visto; dali em diante so entram noticias genuinamente novas.
+    # Com o filtro de idade na coleta, o backlog aqui tem no maximo MAX_AGE_H.
+    if not seen and not queue and not last_ts and items and not dry_run:
+        for it in items:
+            it["score"] = relevance_score(it)
+        items.sort(key=lambda it: (it.get("score", 0), it.get("pub_ts", 0)),
+                   reverse=True)
+        ids_all = [it["id"] for it in items]
+        if send_item(items[0]):
+            save_state(ids_all, [], time.time(),
+                       [_title_key(items[0]["title"])])
+            print(f"primeiro run: estreia 1, {len(ids_all) - 1} marcados como vistos",
+                  file=sys.stderr)
+            return 1
+        # se o envio falhar, segue o fluxo normal abaixo
+
     fresh = 0
     for it in items:
         if it["id"] in seen_set or it["id"] in queued_ids:
             continue
         it["score"] = relevance_score(it)
+        it["enq_ts"] = now  # quando entrou na fila (validade p/ item sem data)
         queue.append(it)
         queued_ids.add(it["id"])
         fresh += 1
 
-    # dedup defensivo + garante score nos itens que ja estavam na fila
-    seen_q, deduped = set(), []
+    # dedup defensivo + validade: item que passou de MAX_AGE_H expira da fila
+    # (e vira "visto", para nao voltar); garante score/enq_ts nos antigos
+    seen_q, deduped, expired = set(), [], 0
     for q in queue:
         if q["id"] in seen_q or q["id"] in seen_set:
+            continue
+        q.setdefault("enq_ts", now)
+        ref = q.get("pub_ts") or q["enq_ts"]
+        if now - ref > MAX_AGE_H * 3600:
+            seen.append(q["id"])
+            seen_set.add(q["id"])
+            expired += 1
             continue
         if "score" not in q:
             q["score"] = relevance_score(q)
         seen_q.add(q["id"])
         deduped.append(q)
-    # ordena por relevancia (desc); empate mantem ordem de chegada (estavel)
-    deduped.sort(key=lambda q: q.get("score", 0), reverse=True)
+    # ordena por relevancia (desc); empate: a mais recente sai primeiro
+    deduped.sort(key=lambda q: (q.get("score", 0),
+                                q.get("pub_ts") or q.get("enq_ts", 0)),
+                 reverse=True)
     queue = deduped[:MAX_QUEUE]
 
-    now = time.time()
     gap_left = MIN_GAP_MIN * 60 - (now - last_ts)
-    print(f"coletados {len(items)} | novos {fresh} | fila {len(queue)} | "
-          f"gap_restante {max(0, int(gap_left / 60))}min", file=sys.stderr)
+    print(f"coletados {len(items)} | novos {fresh} | expiradas {expired} | "
+          f"fila {len(queue)} | gap_restante {max(0, int(gap_left / 60))}min",
+          file=sys.stderr)
 
     # trava de tempo: so posta se ja passou o intervalo minimo desde o ultimo post
     if gap_left > 0 and not dry_run:
-        save_state(seen, queue, last_ts)
+        save_state(seen, queue, last_ts, titles)
         print("postados 0 (trava de tempo ativa)", file=sys.stderr)
         return 0
 
@@ -484,7 +571,10 @@ def run_once(per_run, dry_run=False):
     while queue and posted < per_run:
         it = queue[0]
         tk = _title_key(it["title"])
-        if tk in used_titles:
+        if tk in used_titles or tk in titles_set:
+            # mesma manchete ja postada (por esta ou outra fonte): descarta
+            seen.append(it["id"])
+            seen_set.add(it["id"])
             queue.pop(0)
             continue
         if dry_run:
@@ -497,6 +587,8 @@ def run_once(per_run, dry_run=False):
             continue
         if send_item(it):
             used_titles.add(tk)
+            titles.append(tk)
+            titles_set.add(tk)
             seen.append(it["id"])
             seen_set.add(it["id"])
             queue.pop(0)
@@ -516,7 +608,7 @@ def run_once(per_run, dry_run=False):
             break
 
     if not dry_run:
-        save_state(seen, queue, last_ts)
+        save_state(seen, queue, last_ts, titles)
     print(f"postados {posted} | fila_restante {len(queue)}", file=sys.stderr)
     return posted
 

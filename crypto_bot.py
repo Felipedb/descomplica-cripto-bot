@@ -28,6 +28,7 @@ import sys
 import time
 import html as htmllib
 import argparse
+import tempfile
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -73,6 +74,7 @@ def http_get(url, params=None, headers=None, retries=5, timeout=20):
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=timeout)
             if resp.status_code == 429:
+                last_err = RuntimeError("HTTP 429 (rate limit)")
                 wait = 2 ** attempt * 3
                 print(f"  rate limit (429), aguardando {wait}s...", file=sys.stderr)
                 time.sleep(wait)
@@ -329,11 +331,16 @@ def render_card_png(html, out_path):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
-        page = browser.new_page(viewport={"width": 1080, "height": 1350},
+        page = browser.new_page(viewport={"width": 1080, "height": 1400},
                                 device_scale_factor=2)
         page.set_content(html, wait_until="networkidle")
-        page.wait_for_timeout(1200)  # garante o carregamento das fontes
-        page.screenshot(path=out_path, clip={"x": 0, "y": 0, "width": 1080, "height": 1350})
+        # fontes embutidas (base64): espera o layout assentar antes do print
+        try:
+            page.evaluate("() => document.fonts.ready.then(() => true)")
+        except Exception:  # noqa: BLE001
+            pass
+        page.wait_for_timeout(400)
+        page.screenshot(path=out_path, clip={"x": 0, "y": 0, "width": 1080, "height": 1400})
         browser.close()
     return out_path
 
@@ -350,6 +357,11 @@ def _cap_movers(items, positive):
         sym = htmllib.escape(c["symbol"].upper()[:10])
         out.append(f"\u2022 {sym}: {emoji} {sign}{br_num(abs(c['price_change_percentage_24h']), 2)}%")
     return out
+
+
+def _tg_len(s):
+    """Comprimento como o Telegram conta a legenda (unidades UTF-16)."""
+    return len(s.encode("utf-16-le")) // 2
 
 
 def build_caption(fng, glob, altseason, btc, eth, gainers, losers):
@@ -390,8 +402,10 @@ def build_caption(fng, glob, altseason, btc, eth, gainers, losers):
         L.append("")
     L.append("<i>Fontes: alternative.me, CoinGecko e CoinMarketCap</i>")
     cap = "\n".join(L).strip()
-    if len(cap) > 1024:
-        cap = cap[:1015].rstrip() + "\u2026"
+    # O limite do Telegram e 1024 em unidades UTF-16. Corta por linhas inteiras
+    # para nunca quebrar uma tag HTML no meio (o que invalidaria o parse_mode).
+    while _tg_len(cap) > 1024 and "\n" in cap:
+        cap = cap.rsplit("\n", 1)[0].rstrip()
     return cap
 
 
@@ -474,7 +488,7 @@ def main():
 
     try:
         html = build_card_html(fng, glob, altseason, btc, eth, gainers, losers)
-        out = args.out if args.dry_run else "/tmp/status_cripto.png"
+        out = args.out if args.dry_run else os.path.join(tempfile.gettempdir(), "status_cripto.png")
         render_card_png(html, out)
     except Exception as e:  # noqa: BLE001
         print(f"AVISO: falha ao gerar a imagem ({e}); usando texto.", file=sys.stderr)
